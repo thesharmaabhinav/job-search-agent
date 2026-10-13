@@ -9,12 +9,6 @@ wheels/
 # Virtual environments
 .venv
 
-# Secrets — never commit
-.env
-
-# CV — personal data, never commit
-resume/
-
 # Runtime / generated files — recreated on first run
 jobs_snapshot.json
 ranked_jobs.json
@@ -24,6 +18,3 @@ company_cache.json
 ui_state.json
 jobs_for_labelling.csv
 
-# Internal notes
-claude_markdown_files/
-project_documentation.md
