@@ -79,10 +79,10 @@ uv sync
 
 ### 2. Configure API keys
 
-Create a `.env` file in the project root (never committed):
+Create a `.env` file in the project root:
 
 ```
-OPENAI_API_KEY=sk-...
+OPENAI_API_KEY=...
 RAPIDAPI_KEY=...
 OPIK_API_KEY=...
 OPIK_PROJECT_NAME=job-search-agent
@@ -94,7 +94,7 @@ OPIK_PROJECT_NAME=job-search-agent
 
 ### 3. Add your CV
 
-Place a PDF of your CV at `resume/cv.pdf`. The PDF must have a text layer (not a scanned image). The file is gitignored — it is never committed.
+Place a PDF of your CV at `resume/cv.pdf`. The PDF must have a text layer (not a scanned image). .
 
 ### 4. (Optional) Customise search targets
 
@@ -162,52 +162,37 @@ Experiments run against 46 manually labelled jobs from a fixed snapshot. All pos
 | Reduce seniority | 0.65 | 0.10 | 0.25 | 0.800 | 0.660 |
 | Zero seniority | 0.75 | 0.00 | 0.25 | 0.800 | **0.689** |
 
-**Key finding:** seniority weight was the most damaging dimension for a career transitioner — the LLM judge penalised role-title mismatches even when actual skill overlap was strong. Zeroing it gave the largest NDCG gain (+0.13 over baseline) without hurting precision.
 
 **Precision ceiling at 0.800:** 2 non-relevant jobs score highly on both skills and location regardless of weight configuration. Breaking through requires a stricter judge prompt, not weight tuning — left as a future improvement.
 
 ---
 
-## Project Phases
-
-| Phase | What was built |
-|---|---|
-| 0 | Project setup; Opik observability smoke test |
-| 1 | CV parsing — PDF → `CandidateProfile` via OpenAI structured output |
-| 2 | Job search tool — JSearch API → normalised `Job` Pydantic objects |
-| 3 | LangGraph agent — search loop with retry + rewrite on sparse results |
-| 4 | Hybrid ranking — embedding pre-filter + LLM judge + company quality cache |
-| 5 | Full Opik tracing — root trace, per-node spans, cost/token metadata |
-| 6 | Offline evals — labelled snapshot, precision@10 + NDCG@10 via Opik Experiments |
-| 7 | Streamlit UI — jobs table, config editor, progress bars, auto-rerank |
-
----
 
 ## File Structure
 
 ```
 job-search-agent/
-├── models.py              # all Pydantic data models (Job, CandidateProfile, JobScore, ...)
-├── cv_parser.py           # Phase 1: PDF → CandidateProfile
-├── job_search.py          # Phase 2: JSearch API wrapper
-├── agent.py               # Phase 3: LangGraph agent graph
-├── ranker.py              # Phase 4: embedding pre-filter + LLM judge
-├── eval.py                # Phase 6: precision@10 / NDCG@10 via Opik
-├── label_jobs.py          # Phase 6: CSV export/import for manual labelling
-├── rerank.py              # Phase 7: re-score or reweight snapshot jobs
-├── app.py                 # Phase 7: Streamlit UI
-├── ranker_config.json     # default ranker weights (edit via UI or directly)
-├── pyproject.toml         # uv project manifest
-├── uv.lock                # locked dependency versions
-└── agent_graph.png        # LangGraph visualisation
+├── models.py              
+├── cv_parser.py           
+├── job_search.py          
+├── agent.py               
+├── ranker.py              
+├── eval.py                
+├── label_jobs.py         
+├── rerank.py             
+├── app.py                 
+├── ranker_config.json     
+├── pyproject.toml         
+├── uv.lock               
+└── agent_graph.png       
 ```
 
 **Runtime files (gitignored, generated on first run):**
 
 | File | Contents |
 |---|---|
-| `resume/cv.pdf` | Your CV — never committed |
-| `.env` | API keys — never committed |
+| `resume/cv.pdf` | Your CV|
+| `.env` | API keys|
 | `jobs_snapshot.json` | Raw job pool from last agent run |
 | `ranked_jobs.json` | Scored + ranked jobs for UI display |
 | `labels.json` | URL → relevance label map |
