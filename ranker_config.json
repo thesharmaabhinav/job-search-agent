@@ -1,0 +1,11 @@
+{
+  "w_skills": 0.75,
+  "w_seniority": 0.0,
+  "w_location": 0.25,
+  "w_company": 0.0,
+  "w_salary_bonus": 0.0,
+  "top_k": 15,
+  "embedding_model": "text-embedding-3-small",
+  "llm_model": "gpt-4o-mini",
+  "judge_prompt": "Score job-candidate fit on a 1-10 scale per dimension. Be strict: 10=perfect, 5=average, 1=poor. Omit salary_fit if salary is not listed in the posting."
+}

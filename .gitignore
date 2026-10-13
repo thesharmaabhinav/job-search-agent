@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets — never commit
+.env
+
+# CV — personal data, never commit
+resume/
+
+# Runtime / generated files — recreated on first run
+jobs_snapshot.json
+ranked_jobs.json
+labels.json
+job_scores_cache.json
+company_cache.json
+ui_state.json
+jobs_for_labelling.csv
+
+# Internal notes
+claude_markdown_files/
+project_documentation.md
