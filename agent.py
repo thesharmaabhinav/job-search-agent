@@ -2,110 +2,126 @@ import argparse
 import json
 import os
 from datetime import date
-from typing import TypedDict, Annotated
-import operator
 from pathlib import Path
+
 from dotenv import load_dotenv
 from openai import OpenAI
 from opik.integrations.openai import track_openai
 import opik
-from langgraph.graph import StateGraph, END
 
 from models import CandidateProfile, Job, RankedJob
 from cv_parser import parse_cv, PREFERRED_ROLES, SEARCH_LOCATIONS
-from job_search import search_jobs
 from ranker import rank_jobs
+from tools import TOOLS, execute_tool
 
 load_dotenv()
 
 client = track_openai(OpenAI(api_key=os.getenv("OPENAI_API_KEY")))
 
-MIN_RESULTS_PER_QUERY = 5
-MAX_RETRIES = 2
+MAX_TOOL_CALLS = 15
 
 
-class AgentState(TypedDict):
-    profile: CandidateProfile
-    search_location: str
-    pending_roles: list[str]
-    current_role: str
-    current_query: str
-    raw_jobs: Annotated[list[Job], operator.add]
-    ranked_jobs: list[RankedJob]
-    query_result_count: int
-    retry_count: int
-    queries_made: int
+def _build_system_prompt(
+    profile: CandidateProfile,
+    preferred_roles: list[str] | None,
+    preferred_locations: list[str] | None,
+) -> str:
+    roles = ", ".join(preferred_roles or profile.inferred_roles)
+    locs_list = preferred_locations or profile.preferred_locations
+    locations = ", ".join(locs_list) if locs_list else "flexible"
+    skills = ", ".join(profile.skills[:15])
+    remote = "open to remote" if profile.open_to_remote else "not looking for remote"
 
-
-def plan_query(state: AgentState) -> dict:
-    role = state["pending_roles"][0]
-    query = f"{role} in {state['search_location']}"
-    return {
-        "current_role": role,
-        "current_query": query,
-        "pending_roles": state["pending_roles"][1:],
-        "retry_count": 0,
-        "query_result_count": 0,
-    }
+    return (
+        f"You are a job search agent for {profile.name}, "
+        f"a {profile.current_title} with {profile.years_of_experience} years of experience.\n\n"
+        f"Candidate summary:\n"
+        f"- Target roles: {roles}\n"
+        f"- Key skills: {skills}\n"
+        f"- Preferred locations: {locations}\n"
+        f"- Remote: {remote}\n\n"
+        f"Your goal is to collect a diverse, high-quality set of job postings "
+        f"(aim for 20-40 jobs) relevant to this candidate.\n\n"
+        f"Strategy:\n"
+        f"- Search across the candidate's target roles and preferred locations\n"
+        f"- If a query returns very few results, try broadening it or extending date_posted to 'month'\n"
+        f"- Avoid repeating the same role + location combination you already searched\n"
+        f"- Once you have good coverage across roles and locations, call finish()\n\n"
+        f"You have a budget of {MAX_TOOL_CALLS} tool calls total. Use them wisely."
+    )
 
 
 @opik.track(project_name=os.getenv("OPIK_PROJECT_NAME", "job-search-agent"))
-def rewrite_query(state: AgentState) -> dict:
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a job search expert. Rewrite the given query to return more results by making it slightly broader. Return only the new query string, nothing else.",
-            },
-            {
-                "role": "user",
-                "content": f"Query '{state['current_query']}' returned too few results. Rewrite it to find more {state['current_role']} roles.",
-            },
-        ],
-    )
-    return {
-        "current_query": response.choices[0].message.content.strip(),
-        "retry_count": state["retry_count"] + 1,
-    }
+def run_search_loop(
+    profile: CandidateProfile,
+    preferred_roles: list[str] | None,
+    preferred_locations: list[str] | None,
+) -> tuple[list[Job], int]:
+    """Run the tool-calling search loop. Returns (collected_jobs, tool_calls_used)."""
+    collected_jobs: list[Job] = []
+    tool_call_count = 0
+    messages: list[dict] = [
+        {"role": "system", "content": _build_system_prompt(profile, preferred_roles, preferred_locations)}
+    ]
+
+    while tool_call_count < MAX_TOOL_CALLS:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,  # type: ignore[arg-type]
+            tools=TOOLS,
+            tool_choice="auto",
+        )
+
+        message = response.choices[0].message
+
+        # Append assistant turn as a plain dict for reliable re-serialisation
+        assistant_entry: dict = {"role": "assistant", "content": message.content}
+        if message.tool_calls:
+            assistant_entry["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": tc.type,
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in message.tool_calls
+            ]
+        messages.append(assistant_entry)
+
+        if not message.tool_calls:
+            break  # LLM finished without calling a tool
+
+        done = False
+        for tc in message.tool_calls:
+            tool_call_count += 1
+            try:
+                args = json.loads(tc.function.arguments)
+            except json.JSONDecodeError:
+                args = {}
+
+            args_display = ", ".join(f"{k}={v!r}" for k, v in args.items())
+            print(f"[{tool_call_count}/{MAX_TOOL_CALLS}] {tc.function.name}({args_display})")
+
+            result, is_done = execute_tool(tc.function.name, args, collected_jobs)
+            print(f"  -> {result}")
+
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+            if is_done:
+                done = True
+
+        if done:
+            break
+
+    print(f"\nSearch complete. {len(collected_jobs)} jobs collected in {tool_call_count}/{MAX_TOOL_CALLS} tool calls.")
+    print("Ranking jobs...")
+    return collected_jobs, tool_call_count
 
 
-def search(state: AgentState) -> dict:
-    new_jobs = search_jobs(state["current_query"])
-    return {
-        "raw_jobs": new_jobs,
-        "query_result_count": len(new_jobs),
-        "queries_made": state["queries_made"] + 1,
-    }
-
-
-def route_after_search(state: AgentState) -> str:
-    if state["query_result_count"] < MIN_RESULTS_PER_QUERY and state["retry_count"] < MAX_RETRIES:
-        return "rewrite_query"
-    if state["pending_roles"]:
-        return "plan_query"
-    return "rank"
-
-
-def rank(state: AgentState) -> dict:
-    seen_urls: set[str] = set()
-    unique_jobs: list[Job] = []
-    for job in state["raw_jobs"]:
-        if job.url not in seen_urls:
-            seen_urls.add(job.url)
-            unique_jobs.append(job)
-
-    return {"ranked_jobs": rank_jobs(unique_jobs, state["profile"])}
-
-
-def report(state: AgentState) -> dict:
-    roles_searched = state["queries_made"] - (state["retry_count"])
+def report(ranked_jobs: list[RankedJob], tool_calls_used: int) -> None:
     print(f"\n{'=' * 60}")
-    print(f"Job Search Complete -- {len(state['ranked_jobs'])} unique jobs found")
-    print(f"Location  : {state['search_location']}")
-    print(f"Queries   : {state['queries_made']} total ({roles_searched} roles, {state['retry_count']} retries)")
+    print(f"Job Search Complete -- {len(ranked_jobs)} jobs ranked")
+    print(f"Tool calls used    : {tool_calls_used} / {MAX_TOOL_CALLS}")
     print(f"{'=' * 60}\n")
-    for i, ranked_job in enumerate(state["ranked_jobs"], 1):
+    for i, ranked_job in enumerate(ranked_jobs, 1):
         job = ranked_job.job
         score = ranked_job.score
         print(f"{i}. {job.title} @ {job.company}")
@@ -121,34 +137,6 @@ def report(state: AgentState) -> dict:
         print(f"   Reason   : {score.reasoning}")
         print(f"   URL      : {job.url}")
         print()
-    return {}
-
-
-def build_graph():
-    graph = StateGraph(AgentState)
-
-    graph.add_node("plan_query", plan_query)
-    graph.add_node("search", search)
-    graph.add_node("rewrite_query", rewrite_query)
-    graph.add_node("rank", rank)
-    graph.add_node("report", report)
-
-    graph.set_entry_point("plan_query")
-    graph.add_edge("plan_query", "search")
-    graph.add_conditional_edges(
-        "search",
-        route_after_search,
-        {
-            "rewrite_query": "rewrite_query",
-            "plan_query": "plan_query",
-            "rank": "rank",
-        },
-    )
-    graph.add_edge("rewrite_query", "search")
-    graph.add_edge("rank", "report")
-    graph.add_edge("report", END)
-
-    return graph.compile()
 
 
 def _save_snapshot(jobs: list[Job]) -> None:
@@ -160,11 +148,15 @@ def _save_snapshot(jobs: list[Job]) -> None:
 
 
 @opik.track(project_name=os.getenv("OPIK_PROJECT_NAME", "job-search-agent"), name="job-search-run")
-def run_agent(profile: CandidateProfile, search_location: str, search_roles: list[str], save_snapshot: bool = False) -> None:
+def run_agent(
+    profile: CandidateProfile,
+    save_snapshot: bool = False,
+    preferred_roles: list[str] | None = None,
+    preferred_locations: list[str] | None = None,
+) -> None:
     opik.update_current_span(
         tags=[
-            search_location,
-            ", ".join(search_roles),
+            ", ".join(preferred_roles or profile.inferred_roles),
             date.today().isoformat(),
         ],
         metadata={
@@ -176,35 +168,24 @@ def run_agent(profile: CandidateProfile, search_location: str, search_roles: lis
         },
     )
 
-    final_state = build_graph().invoke({
-        "profile": profile,
-        "search_location": search_location,
-        "pending_roles": search_roles,
-        "current_role": "",
-        "current_query": "",
-        "raw_jobs": [],
-        "ranked_jobs": [],
-        "query_result_count": 0,
-        "retry_count": 0,
-        "queries_made": 0,
-    })
+    collected_jobs, tool_calls_used = run_search_loop(profile, preferred_roles, preferred_locations)
 
     if save_snapshot:
-        _save_snapshot(final_state["raw_jobs"])
+        _save_snapshot(collected_jobs)
+
+    ranked = rank_jobs(collected_jobs, profile)
+    report(ranked, tool_calls_used)
 
 
 if __name__ == "__main__":
     pdf_path = Path(__file__).parent / "resume" / "cv.pdf"
     profile = parse_cv(str(pdf_path))
 
-    search_roles = PREFERRED_ROLES if PREFERRED_ROLES else profile.inferred_roles
-    search_location = (
-        SEARCH_LOCATIONS[0] if SEARCH_LOCATIONS
-        else (profile.preferred_locations[0] if profile.preferred_locations else "India")
-    )
+    preferred_roles = PREFERRED_ROLES if PREFERRED_ROLES else None
+    preferred_locations = SEARCH_LOCATIONS if SEARCH_LOCATIONS else None
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--snapshot", action="store_true", help="Save raw_jobs to jobs_snapshot.json after the run")
+    parser.add_argument("--snapshot", action="store_true", help="Save raw jobs to jobs_snapshot.json after the run")
     args = parser.parse_args()
 
-    run_agent(profile, search_location, search_roles, save_snapshot=args.snapshot)
+    run_agent(profile, save_snapshot=args.snapshot, preferred_roles=preferred_roles, preferred_locations=preferred_locations)
