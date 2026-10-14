@@ -2,16 +2,14 @@
 
 A personal job-search agent that autonomously searches for relevant jobs, ranks them against your CV, and surfaces a shortlist — with a Streamlit UI, full LLM observability via Opik, and offline evaluation using precision@10 and NDCG@10.
 
-Built as a portfolio project to demonstrate the full AI Engineering stack: structured LLM output, agentic loops with LangGraph, hybrid ranking, observability, offline evals, and a production-grade UI.
-
-![Agent Graph](agent_graph.png)
+Built as a portfolio project to demonstrate the full AI Engineering stack: structured LLM output, tool-calling agents, hybrid ranking, observability, offline evals, and a production-grade UI.
 
 ---
 
 ## Features
 
 - **CV Parsing** — extracts structured `CandidateProfile` from a PDF using OpenAI structured output (no regex, no manual parsing)
-- **Agentic Search** — LangGraph agent searches across multiple roles and locations; rewrites queries and retries if results are sparse
+- **Agentic Search** — tool-calling agent where the LLM decides which queries to run, when to retry, and when it has enough results; Python only executes the calls
 - **Hybrid Ranking** — embedding pre-filter (cosine similarity) shortlists candidates cheaply; LLM judge scores each on skills, seniority, location, and salary
 - **Company Scoring** — persistent cache of LLM-scored company reputation; compounds savings across runs
 - **Full Observability** — every LLM call traced in Opik with token counts and cost; per-run tags and metadata
@@ -26,20 +24,28 @@ Built as a portfolio project to demonstrate the full AI Engineering stack: struc
 CV PDF
   │
   ▼
-cv_parser.py  ─── pypdf + OpenAI structured output → CandidateProfile (Pydantic)
+cv_parser.py  ── pypdf + OpenAI structured output → CandidateProfile (Pydantic)
   │
   ▼
-LangGraph Agent
-  ├── plan_query   → construct search query from profile
-  ├── search       → call JSearch API → list[Job]
-  ├── route        → conditional: too few results? rewrite + retry (max 2)
-  └── rank         → embedding pre-filter → LLM judge → list[RankedJob]
+Tool-Calling Search Agent  (agent.py + tools.py)
+  │
+  │  LLM receives: candidate profile + 3 tools + budget (15 calls)
+  │  LLM decides: which queries to run, when to retry, when to stop
+  │
+  ├── search_jobs(query, location, date_posted)  → hits JSearch API
+  ├── get_previous_results()                     → review collected jobs
+  └── finish(reason)                             → signal done
+  │
+  ▼  (all collected jobs passed to ranker)
+Hybrid Ranker  (ranker.py)
+  ├── embedding pre-filter  → cosine similarity → top-K shortlist
+  └── LLM judge             → scores each job on skills / location / seniority / salary
   │
   ▼
 Streamlit UI (app.py)
-  ├── Jobs tab     → ranked table + detail card + Get New Jobs
-  ├── Eval tab     → run precision@10 / NDCG@10 via Opik
-  └── Label tab    → export CSV → label manually → import
+  ├── Jobs tab   → ranked table + detail card + Get New Jobs
+  ├── Eval tab   → run precision@10 / NDCG@10 via Opik
+  └── Label tab  → export CSV → label manually → import
 
 Opik  ←── every LLM call traced: inputs, outputs, tokens, cost
 ```
@@ -57,7 +63,7 @@ Opik  ←── every LLM call traced: inputs, outputs, tokens, cost
 |---|---|
 | Language | Python 3.14+ |
 | Package manager | [uv](https://github.com/astral-sh/uv) |
-| Agent framework | [LangGraph](https://github.com/langchain-ai/langgraph) |
+| Agent pattern | OpenAI tool calling |
 | LLM provider | OpenAI GPT-4o-mini |
 | Data validation | Pydantic v2 |
 | Observability & evals | [Opik](https://www.comet.com/site/products/opik/) (Comet ML) |
@@ -172,19 +178,19 @@ Experiments run against 46 manually labelled jobs from a fixed snapshot. All pos
 
 ```
 job-search-agent/
-├── models.py              
-├── cv_parser.py           
-├── job_search.py          
-├── agent.py               
-├── ranker.py              
-├── eval.py                
-├── label_jobs.py         
-├── rerank.py             
-├── app.py                 
-├── ranker_config.json     
+├── models.py              # Pydantic data models
+├── cv_parser.py           # PDF → CandidateProfile
+├── job_search.py          # JSearch API wrapper
+├── tools.py               # OpenAI tool schemas + executor
+├── agent.py               # tool-calling search loop + report
+├── ranker.py              # embedding pre-filter + LLM judge
+├── eval.py                # precision@10 / NDCG@10 via Opik
+├── label_jobs.py          # CSV export/import for labelling
+├── rerank.py              # re-score or reweight snapshot jobs
+├── app.py                 # Streamlit UI
+├── ranker_config.json     # default ranker weights
 ├── pyproject.toml         
-├── uv.lock               
-└── agent_graph.png       
+└── uv.lock                
 ```
 
 **Runtime files (gitignored, generated on first run):**
@@ -204,7 +210,7 @@ job-search-agent/
 
 ## Cost
 
-A typical run (5 roles, no retries, 15 LLM judge calls, 10 new companies) costs approximately **$0.002–0.005**. Caching means repeat evals and reweighting runs cost nothing.
+A typical run (4–6 tool calls, ~20–30 jobs collected, 15 LLM judge calls, 10 new companies) costs approximately **$0.003–0.008**. Caching means repeat evals and reweighting runs cost nothing.
 
 ---
 
